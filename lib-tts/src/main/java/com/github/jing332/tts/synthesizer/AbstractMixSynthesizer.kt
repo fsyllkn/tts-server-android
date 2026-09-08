@@ -20,14 +20,19 @@ import com.github.michaelbull.result.onSuccess
 import io.github.oshai.kotlinlogging.KLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -37,6 +42,7 @@ import java.io.InputStream
 abstract class AbstractMixSynthesizer() : Synthesizer {
     companion object {
         const val PROCUDE_CAPACITY: Int = 256
+        private const val BGM_PLAYBACK_GRACE_MS = 1200L
     }
 
     private val logger: KLogger
@@ -64,6 +70,9 @@ abstract class AbstractMixSynthesizer() : Synthesizer {
                 mConfigs.values.maxByOrNull { it.audioFormat.sampleRate }?.audioFormat?.sampleRate
                     ?: 16000
         }
+
+    private val bgmScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var bgmStopJob: Job? = null
 
     private fun event(event: Event) {
         context.event?.dispatch(event)
@@ -254,6 +263,35 @@ abstract class AbstractMixSynthesizer() : Synthesizer {
 
     private var initError: SynthesisError? = null
 
+    private fun scheduleBgmStop(
+        sampleRate: Int,
+        pcmBytes: Long,
+        firstAudioAtMs: Long,
+    ) {
+        bgmStopJob?.cancel()
+
+        val bytesPerSecond = sampleRate.toLong() * 2L // PCM 16-bit mono
+        val pcmDurationMs =
+            if (bytesPerSecond > 0L) pcmBytes * 1000L / bytesPerSecond else 0L
+        val elapsedMs =
+            if (firstAudioAtMs > 0L) {
+                (System.currentTimeMillis() - firstAudioAtMs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+        val remainingPlaybackMs = (pcmDurationMs - elapsedMs).coerceAtLeast(0L)
+        val stopDelayMs = remainingPlaybackMs + BGM_PLAYBACK_GRACE_MS
+
+        logger.debug {
+            "bgm keep-alive: pcm=${pcmDurationMs}ms, elapsed=${elapsedMs}ms, stopDelay=${stopDelayMs}ms"
+        }
+
+        bgmStopJob = bgmScope.launch {
+            delay(stopDelayMs)
+            withMain { bgmPlayer.stop() }
+        }
+    }
+
     override suspend fun synthesize(
         params: SystemParams, forceConfigId: Long?, callback: SynthesisCallback,
     ): Result<Unit, SynthesisError> = mutex.withLock {
@@ -269,13 +307,40 @@ abstract class AbstractMixSynthesizer() : Synthesizer {
             return@withLock Err(it)
         }
 
+        bgmStopJob?.cancel()
         withMain { bgmPlayer.play() }
+
+        var outputSampleRate = maxSampleRate
+        var outputPcmBytes = 0L
+        var firstAudioAtMs = 0L
+        var cancelled = false
+        val trackingCallback = object : SynthesisCallback {
+            override fun onSynthesizeStart(sampleRate: Int) {
+                outputSampleRate = sampleRate
+                callback.onSynthesizeStart(sampleRate)
+            }
+
+            override fun onSynthesizeAvailable(audio: ByteArray) {
+                if (firstAudioAtMs == 0L) firstAudioAtMs = System.currentTimeMillis()
+                outputPcmBytes += audio.size
+                callback.onSynthesizeAvailable(audio)
+            }
+        }
+
         try {
-            executeSynthesis(params, callback, forceConfigId)
+            executeSynthesis(params, trackingCallback, forceConfigId)
+        } catch (e: CancellationException) {
+            cancelled = true
+            throw e
         } finally {
             logger.debug { "synthesize done" }
-            withContext(NonCancellable) {
-                withMain { bgmPlayer.stop() }
+            if (cancelled) {
+                withContext(NonCancellable) {
+                    bgmStopJob?.cancel()
+                    withMain { bgmPlayer.stop() }
+                }
+            } else {
+                scheduleBgmStop(outputSampleRate, outputPcmBytes, firstAudioAtMs)
             }
         }
     }
@@ -325,6 +390,7 @@ abstract class AbstractMixSynthesizer() : Synthesizer {
     @MainThread
     override suspend fun destroy() = mutex.withLock {
         isInitialized = false
+        bgmStopJob?.cancel()
         repo.destroy()
         ttsRequester.destroy()
         streamProcessor.destroy()
