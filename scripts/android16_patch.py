@@ -15,10 +15,12 @@ def replace_once(path: Path, old: str, new: str, label: str) -> None:
     raise SystemExit(f"[{label}] neither old nor patched source block found in {path}")
 
 
-# Android 16 / API 36 toolchain.
+# Compile against Android 16, but keep targetSdk 35 for now. The app does not
+# need targetSdk 36 merely to run on Android 16, and keeping 35 avoids changing
+# TTS/background-service behavior while we are repairing compatibility.
 versions = ROOT / "libs.versions.toml"
 replace_once(versions, 'compileSdk = "35"', 'compileSdk = "36"', "compileSdk 36")
-replace_once(versions, 'targetSdk = "35"', 'targetSdk = "36"', "targetSdk 36")
+replace_once(versions, 'targetSdk = "36"', 'targetSdk = "35"', "targetSdk 35 compatibility")
 replace_once(versions, 'agp = "8.8.1"', 'agp = "8.10.1"', "AGP 8.10.1")
 
 wrapper = ROOT / "gradle/wrapper/gradle-wrapper.properties"
@@ -130,6 +132,184 @@ replace_once(
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />''',
     "Manifest legacy storage maxSdkVersion",
+)
+
+# Android Settings enables its Play/rate/pitch controls only when the engine's
+# default locale is also returned by CHECK_TTS_DATA. Keep the engine's default
+# voice deterministic (zh-CN) instead of tying it to the phone UI locale, and
+# accept both ISO-639-1 and ISO-639-2 language/country forms.
+system_tts = ROOT / "app/src/main/java/com/github/jing332/tts_server_android/service/systts/SystemTtsService.kt"
+replace_once(
+    system_tts,
+    '''    private val mTextProcessor = TextProcessor()
+    private var mTtsManager: MixSynthesizer? = null
+''',
+    '''    private val mTextProcessor = TextProcessor()
+    private var mTtsManager: MixSynthesizer? = null
+    private var mInitManagerJob: Job? = null
+''',
+    "Track TTS manager initialization",
+)
+replace_once(
+    system_tts,
+    '''    fun initManager() {
+        logger.debug { "initialize or load configruation" }
+        mScope.launch {''',
+    '''    fun initManager() {
+        logger.debug { "initialize or load configruation" }
+        mInitManagerJob = mScope.launch {''',
+    "Store TTS manager init job",
+)
+replace_once(
+    system_tts,
+    '''    override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
+        return if (Locale.SIMPLIFIED_CHINESE.isO3Language == lang || Locale.US.isO3Language == lang) {
+            if (Locale.SIMPLIFIED_CHINESE.isO3Country == country || Locale.US.isO3Country == country) TextToSpeech.LANG_COUNTRY_AVAILABLE else TextToSpeech.LANG_AVAILABLE
+        } else TextToSpeech.LANG_NOT_SUPPORTED
+    }''',
+    '''    override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
+        val language = lang?.lowercase(Locale.ROOT)
+        val region = country?.uppercase(Locale.ROOT)
+        val isChinese = language == "zho" || language == "zh"
+        val isEnglish = language == "eng" || language == "en"
+
+        if (!isChinese && !isEnglish) return TextToSpeech.LANG_NOT_SUPPORTED
+        if (region.isNullOrBlank()) return TextToSpeech.LANG_AVAILABLE
+
+        val countryMatches =
+            (isChinese && (region == "CHN" || region == "CN")) ||
+                (isEnglish && (region == "USA" || region == "US"))
+        return if (countryMatches) TextToSpeech.LANG_COUNTRY_AVAILABLE
+        else TextToSpeech.LANG_AVAILABLE
+    }''',
+    "Robust TTS language availability",
+)
+replace_once(
+    system_tts,
+    '''            mutableListOf(Voice(DEFAULT_VOICE_NAME, Locale.getDefault(), 0, 0, true, emptySet()))''',
+    '''            mutableListOf(Voice(DEFAULT_VOICE_NAME, Locale.SIMPLIFIED_CHINESE, 0, 0, true, emptySet()))''',
+    "Stable default TTS voice locale",
+)
+replace_once(
+    system_tts,
+    '''            callback.done()
+            return
+        }
+
+        mNotificationJob?.cancel()''',
+    '''            callback.done()
+            return
+        }
+
+        // initManager() is asynchronous. A client can request speech immediately
+        // after binding; wait for initialization instead of silently doing nothing
+        // while mTtsManager is still null.
+        runBlocking { mInitManagerJob?.join() }
+        if (mTtsManager == null) {
+            logger.error { "TTS manager is unavailable after initialization" }
+            callback.error(TextToSpeech.ERROR_SYNTHESIS)
+            callback.done()
+            return
+        }
+
+        mNotificationJob?.cancel()''',
+    "Wait for TTS manager before synthesis",
+)
+
+# Make CHECK_TTS_DATA agree with the engine's two supported locales. This is
+# what Android Settings uses to decide whether the Play button should be active.
+check_voice = ROOT / "app/src/main/java/com/github/jing332/tts_server_android/service/systts/CheckVoiceData.kt"
+replace_once(
+    check_voice,
+    '''        val available: ArrayList<String> = arrayListOf("zho-CHN")''',
+    '''        val available: ArrayList<String> = arrayListOf(
+            "zho-CHN",
+            "zho",
+            "eng-USA",
+            "eng"
+        )''',
+    "Advertise supported TTS locales",
+)
+
+# Android Settings asks the selected engine for sample text through
+# ACTION_GET_SAMPLE_TEXT. The upstream app does not provide this activity, so
+# add a minimal implementation for a reliable system Settings audition.
+sample_text = ROOT / "app/src/main/java/com/github/jing332/tts_server_android/service/systts/GetSampleText.kt"
+sample_text_content = '''package com.github.jing332.tts_server_android.service.systts
+
+import android.app.Activity
+import android.content.Intent
+import android.os.Bundle
+import android.speech.tts.TextToSpeech
+
+class GetSampleText : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val language = intent.getStringExtra("language")?.lowercase().orEmpty()
+        val sample = if (language == "eng" || language == "en") {
+            "This is a text to speech sample."
+        } else {
+            "这是一段文字转语音测试。"
+        }
+
+        setResult(
+            TextToSpeech.LANG_AVAILABLE,
+            Intent().putExtra("sampleText", sample)
+        )
+        finish()
+    }
+}
+'''
+if sample_text.exists():
+    if sample_text.read_text(encoding="utf-8") != sample_text_content:
+        sample_text.write_text(sample_text_content, encoding="utf-8")
+        print(f"[OK] TTS sample text activity: updated {sample_text}")
+    else:
+        print(f"[OK] TTS sample text activity: already present {sample_text}")
+else:
+    sample_text.write_text(sample_text_content, encoding="utf-8")
+    print(f"[OK] TTS sample text activity: created {sample_text}")
+
+replace_once(
+    manifest,
+    '''        <activity
+            android:name=".service.systts.CheckVoiceData"
+            android:exported="true"
+            android:label="CheckVoiceData">
+            <intent-filter>
+                <action android:name="android.speech.tts.engine.CHECK_TTS_DATA" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".compose.DebugSystemTtsActivity"''',
+    '''        <activity
+            android:name=".service.systts.CheckVoiceData"
+            android:exported="true"
+            android:label="CheckVoiceData">
+            <intent-filter>
+                <action android:name="android.speech.tts.engine.CHECK_TTS_DATA" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".service.systts.GetSampleText"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".compose.DebugSystemTtsActivity"''',
+    "Register TTS sample text activity",
 )
 
 print("Android 16 compatibility patch is present.")
