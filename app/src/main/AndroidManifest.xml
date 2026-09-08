@@ -187,6 +187,16 @@
         </activity>
 
         <activity
+            android:name=".service.systts.GetSampleText"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".compose.DebugSystemTtsActivity"
             android:exported="true"
             android:label="@string/debug"
