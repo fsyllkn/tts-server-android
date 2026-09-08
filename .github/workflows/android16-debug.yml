@@ -82,7 +82,7 @@ jobs:
         shell: bash
         run: |
           grep -n 'compileSdk = "36"' libs.versions.toml
-          grep -n 'targetSdk = "36"' libs.versions.toml
+          grep -n 'targetSdk = "35"' libs.versions.toml
           grep -n 'agp = "8.10.1"' libs.versions.toml
           grep -n 'gradle-8.11.1-bin.zip' gradle/wrapper/gradle-wrapper.properties
           git diff --check
