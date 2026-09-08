@@ -295,14 +295,14 @@ class BgmConfigUI : IConfigUI() {
                 }
             }
 
-            val storagePermission =
-                rememberPermissionState(Manifest.permission.READ_EXTERNAL_STORAGE)
-            if (!storagePermission.status.isGranted)
-                warnButton(text = stringResource(R.string.grant_permission_storage_file)) {
-                    storagePermission.launchPermissionRequest()
-                }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // A13
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) { // Android 12L and below
+                val storagePermission =
+                    rememberPermissionState(Manifest.permission.READ_EXTERNAL_STORAGE)
+                if (!storagePermission.status.isGranted)
+                    warnButton(text = stringResource(R.string.grant_permission_storage_file)) {
+                        storagePermission.launchPermissionRequest()
+                    }
+            } else { // Android 13+ (including Android 16)
                 val audioPermission = rememberPermissionState(Manifest.permission.READ_MEDIA_AUDIO)
 
                 if (!audioPermission.status.isGranted)

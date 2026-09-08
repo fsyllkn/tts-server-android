@@ -154,21 +154,24 @@ class FilePickerActivity : ComposeActivity() {
 
         requestData = intent.getParcelableExtra(KEY_REQUEST_DATA)!!
 
-        checkPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             checkPermission(Manifest.permission.READ_MEDIA_AUDIO)
+        } else {
+            checkPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
         if (requestData is RequestSaveFile) {
-            val permission = ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.WRITE_EXTERNAL_STORAGE
-            )
-            if (permission != PackageManager.PERMISSION_GRANTED)
-                ActivityCompat.requestPermissions(
-                    this, arrayOf(
-                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                    ), 1
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                val permission = ActivityCompat.checkSelfPermission(
+                    this, Manifest.permission.WRITE_EXTERNAL_STORAGE
                 )
+                if (permission != PackageManager.PERMISSION_GRANTED)
+                    ActivityCompat.requestPermissions(
+                        this, arrayOf(
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        ), 1
+                    )
+            }
 
             docCreate =
                 registerForActivityResult(ActivityResultContracts.CreateDocument(reqSaveFile.fileMime)) { uri ->
