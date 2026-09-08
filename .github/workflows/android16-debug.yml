@@ -6,6 +6,9 @@ on:
       - android16
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,6 +39,24 @@ jobs:
 
       - name: Apply Android 16 compatibility patch
         run: python3 scripts/android16_patch.py
+
+      - name: Persist patched sources
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            libs.versions.toml \
+            gradle/wrapper/gradle-wrapper.properties \
+            app/src/main/AndroidManifest.xml \
+            app/src/main/java/com/github/jing332/tts_server_android/compose/systts/list/ui/BgmConfigUI.kt \
+            app/src/main/java/com/github/jing332/tts_server_android/ui/FilePickerActivity.kt
+          if ! git diff --cached --quiet; then
+            git commit -m "Apply Android 16 compatibility changes"
+            git push origin HEAD:android16
+          else
+            echo "Android 16 source changes are already committed."
+          fi
 
       - name: Create temporary signing key
         shell: bash
