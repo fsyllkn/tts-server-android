@@ -5,10 +5,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def replace_once(path: Path, old: str, new: str, label: str) -> None:
     text = path.read_text(encoding="utf-8")
-    if old not in text:
-        raise SystemExit(f"[{label}] expected source block not found in {path}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
-    print(f"[OK] {label}: {path}")
+    if old in text:
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        print(f"[OK] {label}: patched {path}")
+        return
+    if new in text:
+        print(f"[OK] {label}: already patched {path}")
+        return
+    raise SystemExit(f"[{label}] neither old nor patched source block found in {path}")
 
 
 # Android 16 / API 36 toolchain.
@@ -128,4 +132,4 @@ replace_once(
     "Manifest legacy storage maxSdkVersion",
 )
 
-print("Android 16 compatibility patch applied successfully.")
+print("Android 16 compatibility patch is present.")
