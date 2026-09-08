@@ -1,0 +1,76 @@
+name: Android 16 Debug APK
+
+on:
+  push:
+    branches:
+      - android16
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android 16 SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36"
+
+      - name: Apply Android 16 compatibility patch
+        run: python3 scripts/android16_patch.py
+
+      - name: Create temporary signing key
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/android16-debug.jks" \
+            -storepass android16 \
+            -keypass android16 \
+            -alias android16 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=TTS Server Android16 Debug, OU=CI, O=Local, L=Local, S=Local, C=US"
+
+          cat > local.properties <<EOF
+          KEY_PATH=$GITHUB_WORKSPACE/android16-debug.jks
+          KEY_PASSWORD=android16
+          ALIAS_NAME=android16
+          ALIAS_PASSWORD=android16
+          EOF
+
+      - name: Verify patch
+        shell: bash
+        run: |
+          grep -n 'compileSdk = "36"' libs.versions.toml
+          grep -n 'targetSdk = "36"' libs.versions.toml
+          grep -n 'agp = "8.10.1"' libs.versions.toml
+          grep -n 'gradle-8.11.1-bin.zip' gradle/wrapper/gradle-wrapper.properties
+          git diff --check
+
+      - name: Build dev debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDevDebug --stacktrace --warning-mode all
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TTS-Server-Android16-Debug
+          path: app/build/outputs/apk/dev/debug/*.apk
+          if-no-files-found: error
